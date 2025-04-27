@@ -127,3 +127,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Generated data and models
+*.csv
+*.joblib
+data/
