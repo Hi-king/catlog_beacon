@@ -5,7 +5,15 @@ description = ""
 authors = ["Hi-king <hikingko1@gmail.com>"]
 
 [tool.poetry.dependencies]
-python = "^3.7"
+python = ">=3.12,<3.14"
+bleak = "^0.22.3"
+ipykernel = "*"
+joblib = "*"
+scikit-learn = "*"
+pandas = "*"
+seaborn = "*"
+japanize-matplotlib = "*"
+setuptools = "*"
 
 [tool.poetry.dev-dependencies]
 
