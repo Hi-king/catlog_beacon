@@ -4,6 +4,7 @@ catlog_live_inference.py (macOS 用)
 
  - 名前が "Cat" で始まる BLE デバイスを自動認識し、RSSIを記録・プロット。
  - 1分ごとに過去1分間のデータから場所を推論し、条件を満たし場所が変われば結果をSlackに投稿。
+ - 場所変更通知時、スレッドに直近30分の推論履歴を投稿。
 """
 
 import asyncio
@@ -33,6 +34,7 @@ PLOT_INTERVAL   = 0.25       # グラフ更新間隔 [s]
 INFERENCE_INTERVAL_SEC = 60   # 推論実行間隔 [s]
 CONSECUTIVE_PREDICTIONS_FOR_SLACK = 3 # Slack通知に必要な連続同一予測回数
 SLACK_CONFIDENCE_THRESHOLD = 0.60 # Slack通知に必要な信頼度(確率)の閾値 (0.0 ~ 1.0)
+INFERENCE_LOG_HISTORY_MINUTES = 30 # Slackスレッド投稿用の履歴保持期間(分)
 Y_LIM           = (-100, -30) # RSSI 表示範囲
 CSV_FILENAME    = "rssi_inference_log.csv" # 出力CSVファイル名
 MODEL_BUNDLE_PATH = "location_classification_bundle.joblib" # 学習済みモデルバンドル
@@ -46,6 +48,9 @@ time_buf = deque(maxlen=int(PLOT_WINDOW_SEC / SCAN_INTERVAL) if SCAN_INTERVAL > 
 rssi_buf = deque(maxlen=int(PLOT_WINDOW_SEC / SCAN_INTERVAL) if SCAN_INTERVAL > 0 else 10000)
 # 推論用データバッファ
 inference_data_window = deque(maxlen=int((INFERENCE_INTERVAL_SEC + 10) / SCAN_INTERVAL) if SCAN_INTERVAL > 0 else 500) # 余裕を持たせる
+# 推論ログ履歴バッファ (Slackスレッド投稿用)
+inference_log_history_maxlen = int(INFERENCE_LOG_HISTORY_MINUTES * 60 / INFERENCE_INTERVAL_SEC) if INFERENCE_INTERVAL_SEC > 0 else 30
+inference_log_history = deque(maxlen=inference_log_history_maxlen) # (datetime, location, probability)
 last_inference_time = time.time()
 last_predicted_location = "不明" # プロット表示用
 prediction_history = deque(maxlen=CONSECUTIVE_PREDICTIONS_FOR_SLACK) # Slack通知判定用の予測履歴
@@ -107,17 +112,22 @@ except IOError as e:
 
 # ───────────────── 関数 ─────────────────
 
-def post_to_slack(channel, text):
-    """Slackにメッセージを投稿する"""
+def post_to_slack(channel, text, thread_ts=None):
+    """Slackにメッセージを投稿する。成功したらレスポンスを、失敗したらNoneを返す"""
     try:
-        response = slack_client.chat_postMessage(channel=channel, text=text)
-        # 成功ログは呼び出し元で出力
+        response = slack_client.chat_postMessage(
+            channel=channel,
+            text=text,
+            thread_ts=thread_ts # スレッド投稿用に追加
+        )
+        return response # 成功時はレスポンスを返す
     except SlackApiError as e:
         print(f"[ERROR] Failed to post to Slack: {e.response['error']}")
+        return None # 失敗時はNoneを返す
 
 def format_duration(seconds):
     """秒数を「X分Y秒」の形式にフォーマットする"""
-    if seconds < 0:
+    if seconds is None or seconds < 0:
         return "不明な時間"
     minutes, sec = divmod(int(seconds), 60)
     if minutes > 0:
@@ -146,9 +156,11 @@ def extract_inference_features(data_list):
     return feature_df
 
 def run_inference():
-    """データウィンドウから特徴量を抽出し、推論を実行、条件を満たせばSlackに投稿"""
-    global last_predicted_location, prediction_history, last_notified_location, last_notified_time
+    """データウィンドウから特徴量を抽出し、推論を実行、条件を満たせばSlackに投稿＆履歴投稿"""
+    global last_predicted_location, prediction_history, inference_log_history
+    global last_notified_location, last_notified_time
     current_run_time = time.time() # この推論実行開始時刻
+    now_dt = datetime.now() # 履歴記録用
     one_minute_ago = current_run_time - INFERENCE_INTERVAL_SEC
 
     recent_data = [item for item in inference_data_window if item[0] >= one_minute_ago]
@@ -168,6 +180,9 @@ def run_inference():
                 print(f"[INFO] Predicted location: {predicted_location} (Prob: {predicted_probability:.2f})")
                 last_predicted_location = predicted_location # プロット用は常に更新
 
+                # 推論ログ履歴に追加
+                inference_log_history.append((now_dt, predicted_location, predicted_probability))
+
                 # --- Slack通知判定ロジック ---
                 prediction_history.append(predicted_location)
 
@@ -186,34 +201,63 @@ def run_inference():
 
                             # 最後に通知した場所から変わったか？ (初回通知も含む)
                             if confirmed_location != last_notified_location:
-                                duration_str = ""
+                                duration_seconds = None
                                 if last_notified_location is not None and last_notified_time is not None:
                                     duration_seconds = confirmed_time - last_notified_time
-                                    duration_str = f"（「{last_notified_location}」に{format_duration(duration_seconds)}滞在）"
+                                duration_str = f"（「{last_notified_location}」に{format_duration(duration_seconds)}滞在）" if duration_seconds is not None else ""
 
+                                # 1. メインチャンネルへの通知
                                 slack_message = f"猫様は現在「{confirmed_location}」に移動しました {duration_str}(信頼度: {confirmed_probability:.0%})"
-                                post_to_slack(args.slack_channel, slack_message)
-                                print(f"[INFO] Slack notification condition met (location changed). Posted: {slack_message}")
+                                main_post_response = post_to_slack(args.slack_channel, slack_message)
 
-                                # 通知状態を更新
-                                last_notified_location = confirmed_location
-                                last_notified_time = confirmed_time
+                                if main_post_response and main_post_response.get("ok"):
+                                    print(f"[INFO] Slack notification posted (location changed): {slack_message}")
+                                    message_ts = main_post_response.get("ts")
+
+                                    # 2. スレッドへの履歴投稿
+                                    if message_ts:
+                                        thread_history_limit = now_dt - timedelta(minutes=INFERENCE_LOG_HISTORY_MINUTES)
+                                        history_lines = []
+                                        for dt, loc, prob in reversed(inference_log_history): # 新しい順に
+                                            if dt >= thread_history_limit:
+                                                history_lines.append(f"- {dt.strftime('%H:%M:%S')}: {loc} ({prob:.0%})")
+                                            else:
+                                                break # 期間外になったら終了
+
+                                        if history_lines:
+                                            thread_message = f"直近{INFERENCE_LOG_HISTORY_MINUTES}分間の推論履歴:\n" + "\n".join(reversed(history_lines)) # 古い順に戻す
+                                            thread_post_response = post_to_slack(args.slack_channel, thread_message, thread_ts=message_ts)
+                                            if thread_post_response and thread_post_response.get("ok"):
+                                                print(f"[INFO] Posted inference history to the thread (ts: {message_ts})")
+                                            else:
+                                                print(f"[WARN] Failed to post history to the thread (ts: {message_ts})")
+                                        else:
+                                            print("[INFO] No recent inference history to post to the thread.")
+                                    else:
+                                        print("[WARN] Could not get message timestamp ('ts') to post history to thread.")
+
+                                    # 通知状態を更新
+                                    last_notified_location = confirmed_location
+                                    last_notified_time = confirmed_time
+                                else:
+                                    # メイン投稿失敗
+                                    print("[WARN] Failed to post main Slack notification.")
+
+
                             else:
                                 # 場所は確定したが、前回通知から変わっていない
                                 print(f"[INFO] Location '{confirmed_location}' confirmed, but no change since last notification. No Slack post.")
 
-                            # 場所が確定したら（通知有無に関わらず）履歴をクリア
+                            # 場所が確定したら（通知有無に関わらず）予測履歴をクリア
                             prediction_history.clear()
                             print("[INFO] Prediction history cleared after confirmation.")
 
                         else:
                             # 連続だが信頼度が低い
                             print(f"[INFO] Consecutive prediction '{confirmed_location}', but confidence ({confirmed_probability:.2f}) is below threshold ({SLACK_CONFIDENCE_THRESHOLD}). Not confirmed yet.")
-                            # 履歴はクリアしない（次の推論で閾値を超える可能性を待つ）
                     else:
                         # 履歴は溜まったが連続ではない
                         print(f"[INFO] Prediction history is full but not consecutive: {list(prediction_history)}. No confirmation.")
-                        # 履歴はdequeにより自動で古いものが削除される
                 else:
                     # 履歴がまだ溜まっていない
                      print(f"[INFO] Prediction history count ({len(prediction_history)}/{CONSECUTIVE_PREDICTIONS_FOR_SLACK}) not met yet.")
@@ -295,9 +339,7 @@ ax.set_xlabel("Elapsed time [s]")
 ax.set_ylabel("RSSI [dBm]")
 ax.set_ylim(*Y_LIM)
 ax.legend(loc="upper left")
-# タイトルには最後に「通知された」場所を表示する方が混乱が少ないかも？
-# title_text = ax.set_title(f'BLE RSSI – "{TARGET_PREFIX}" / Last notified: {last_notified_location or "N/A"}')
-title_text = ax.set_title(f'BLE RSSI – "{TARGET_PREFIX}" / Predicted: {last_predicted_location}') # とりあえず最新推論のまま
+title_text = ax.set_title(f'BLE RSSI – "{TARGET_PREFIX}" / Predicted: {last_predicted_location}')
 
 
 print("[INFO] Plotting started. Close the plot window to exit.")
@@ -311,11 +353,7 @@ try:
                 ax.set_xlim(plot_start_time, current_max_time + PLOT_WINDOW_SEC * 0.05)
 
                 line.set_data(list(time_buf), list(rssi_buf))
-                # タイトル更新 (最新推論のまま)
                 title_text.set_text(f'BLE RSSI – "{TARGET_PREFIX}" / Predicted: {last_predicted_location}')
-                # # タイトル更新 (最後に通知された場所を表示する場合)
-                # current_notified_str = last_notified_location if last_notified_location is not None else "N/A"
-                # title_text.set_text(f'BLE RSSI – "{TARGET_PREFIX}" / Last notified: {current_notified_str}')
 
 
         fig.canvas.draw_idle()
