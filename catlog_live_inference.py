@@ -17,6 +17,7 @@ import argparse
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Deque, List, Tuple, Optional, Any # ★ 型ヒント用
 
 import pandas as pd
 import numpy as np
@@ -44,16 +45,16 @@ PLOT_WINDOW_SEC = 600 # プロット表示期間（秒）
 t0 = time.time()
 buf_lock = threading.Lock()
 # プロット&CSV用バッファ
-time_buf = deque(maxlen=int(PLOT_WINDOW_SEC / SCAN_INTERVAL) if SCAN_INTERVAL > 0 else 10000)
-rssi_buf = deque(maxlen=int(PLOT_WINDOW_SEC / SCAN_INTERVAL) if SCAN_INTERVAL > 0 else 10000)
-# 推論用データバッファ
-inference_data_window = deque(maxlen=int((INFERENCE_INTERVAL_SEC + 10) / SCAN_INTERVAL) if SCAN_INTERVAL > 0 else 500) # 余裕を持たせる
+time_buf: Deque[float] = deque(maxlen=int(PLOT_WINDOW_SEC / SCAN_INTERVAL) if SCAN_INTERVAL > 0 else 10000)
+rssi_buf: Deque[int] = deque(maxlen=int(PLOT_WINDOW_SEC / SCAN_INTERVAL) if SCAN_INTERVAL > 0 else 10000)
+# 推論用データバッファ (タイムスタンプ, RSSI)
+inference_data_window: Deque[Tuple[float, int]] = deque(maxlen=int((INFERENCE_INTERVAL_SEC + 10) / SCAN_INTERVAL) if SCAN_INTERVAL > 0 else 500) # 余裕を持たせる
 # 推論ログ履歴バッファ (Slackスレッド投稿用)
 inference_log_history_maxlen = int(INFERENCE_LOG_HISTORY_MINUTES * 60 / INFERENCE_INTERVAL_SEC) if INFERENCE_INTERVAL_SEC > 0 else 30
-inference_log_history = deque(maxlen=inference_log_history_maxlen) # (datetime, location, probability)
+inference_log_history: Deque[Tuple[datetime, str, float]] = deque(maxlen=inference_log_history_maxlen) # (datetime, location, probability)
 last_inference_time = time.time()
-last_predicted_location = "不明" # プロット表示用
-prediction_history = deque(maxlen=CONSECUTIVE_PREDICTIONS_FOR_SLACK) # Slack通知判定用の予測履歴
+last_predicted_location: str = "不明" # プロット表示用
+prediction_history: Deque[str] = deque(maxlen=CONSECUTIVE_PREDICTIONS_FOR_SLACK) # Slack通知判定用の予測履歴
 # Slack通知状態管理
 last_notified_location = None # 最後に通知した場所
 last_notified_time = None     # 最後に通知した時刻 (time.time())
@@ -95,10 +96,20 @@ except SlackApiError as e:
 
 # --- CSV ファイル準備 ---
 try:
-    csv_file = open(CSV_FILENAME, 'w', newline='')
+    # ファイルが存在するか確認し、ヘッダーが必要か判断
+    csv_path = Path(CSV_FILENAME)
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+
+    # 追記モード ('a') でファイルを開く
+    csv_file = open(CSV_FILENAME, 'a', newline='')
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["datetime", "time_s", "rssi_dbm", "predicted_location"]) # ヘッダー
-    print(f"[INFO] Writing log data to '{CSV_FILENAME}'")
+
+    if write_header:
+        csv_writer.writerow(["datetime", "time_s", "rssi_dbm", "predicted_location"]) # ヘッダー
+        print(f"[INFO] Writing header and starting log to '{CSV_FILENAME}'")
+    else:
+        print(f"[INFO] Appending log data to existing '{CSV_FILENAME}'")
+
 
     @atexit.register
     def close_csv():
@@ -184,20 +195,30 @@ def run_inference():
                 inference_log_history.append((now_dt, predicted_location, predicted_probability))
 
                 # --- Slack通知判定ロジック ---
-                prediction_history.append(predicted_location)
+                # 信頼度が閾値以上の場合のみ連続予測履歴に追加
+                if predicted_probability >= SLACK_CONFIDENCE_THRESHOLD:
+                    prediction_history.append(predicted_location)
+                    print(f"[DEBUG] Added '{predicted_location}' to prediction_history (Prob: {predicted_probability:.2f} >= {SLACK_CONFIDENCE_THRESHOLD})")
+                else:
+                    # 信頼度が低い場合は履歴に追加せず、連続性をチェックしない
+                    # (連続履歴が途切れることになる)
+                    print(f"[DEBUG] Skipped adding '{predicted_location}' to prediction_history due to low confidence (Prob: {predicted_probability:.2f} < {SLACK_CONFIDENCE_THRESHOLD})")
 
+                # 連続予測回数に達した場合のみ確認処理へ進む
                 if len(prediction_history) == CONSECUTIVE_PREDICTIONS_FOR_SLACK:
                     first_prediction = prediction_history[0]
                     is_consecutive = all(p == first_prediction for p in prediction_history)
 
                     if is_consecutive:
                         confirmed_location = first_prediction
-                        confirmed_probability = predicted_probability # 最新の確率を使用
+                        # 連続が確認された時点での最新の確率を使用 (履歴には古い確率も含まれる可能性があるため)
+                        # confirmed_probability = predicted_probability # この行は不要 (閾値チェックで既に実施済み)
                         confirmed_time = current_run_time # 確定した時刻
 
-                        # 信頼度が閾値以上か？
-                        if confirmed_probability >= SLACK_CONFIDENCE_THRESHOLD:
-                            print(f"[INFO] Location '{confirmed_location}' confirmed (Confidence: {confirmed_probability:.2f})")
+                        # 信頼度が閾値以上か？ (履歴追加時にチェック済みだが念のため)
+                        # ※ 信頼度が低い場合は prediction_history に追加されないため、この if 文は常に True になるはず
+                        if predicted_probability >= SLACK_CONFIDENCE_THRESHOLD:
+                            print(f"[INFO] Location '{confirmed_location}' confirmed (Confidence: {predicted_probability:.2f})")
 
                             # 最後に通知した場所から変わったか？ (初回通知も含む)
                             if confirmed_location != last_notified_location:
@@ -207,7 +228,7 @@ def run_inference():
                                 duration_str = f"（「{last_notified_location}」に{format_duration(duration_seconds)}滞在）" if duration_seconds is not None else ""
 
                                 # 1. メインチャンネルへの通知
-                                slack_message = f"猫様は現在「{confirmed_location}」に移動しました {duration_str}(信頼度: {confirmed_probability:.0%})"
+                                slack_message = f"猫様は現在「{confirmed_location}」に移動しました {duration_str}(信頼度: {predicted_probability:.0%})"
                                 main_post_response = post_to_slack(args.slack_channel, slack_message)
 
                                 if main_post_response and main_post_response.get("ok"):
@@ -239,28 +260,26 @@ def run_inference():
                                     # 通知状態を更新
                                     last_notified_location = confirmed_location
                                     last_notified_time = confirmed_time
+                                    # ★★★ 場所変更通知が成功した後に履歴をクリア ★★★
+                                    prediction_history.clear()
+                                    print("[INFO] Prediction history cleared after location change notification.")
                                 else:
                                     # メイン投稿失敗
                                     print("[WARN] Failed to post main Slack notification.")
-
+                                    # ★ 失敗時は履歴をクリアしない (次の機会に再試行できるように)
 
                             else:
                                 # 場所は確定したが、前回通知から変わっていない
                                 print(f"[INFO] Location '{confirmed_location}' confirmed, but no change since last notification. No Slack post.")
+                                # ★ 場所が変わっていない場合は履歴をクリアしない ★
 
-                            # 場所が確定したら（通知有無に関わらず）予測履歴をクリア
-                            prediction_history.clear()
-                            print("[INFO] Prediction history cleared after confirmation.")
-
-                        else:
+                        # else: # ★ この else ブロックは不要 (閾値チェックは履歴追加時に実施済み)
                             # 連続だが信頼度が低い
-                            print(f"[INFO] Consecutive prediction '{confirmed_location}', but confidence ({confirmed_probability:.2f}) is below threshold ({SLACK_CONFIDENCE_THRESHOLD}). Not confirmed yet.")
+                            # print(f"[INFO] Consecutive prediction '{confirmed_location}', but confidence ({predicted_probability:.2f}) is below threshold ({SLACK_CONFIDENCE_THRESHOLD}). Not confirmed yet.")
                     else:
-                        # 履歴は溜まったが連続ではない
+                        # 履歴は溜まったが連続ではない (閾値チェックにより通常ここには来ないはず)
                         print(f"[INFO] Prediction history is full but not consecutive: {list(prediction_history)}. No confirmation.")
-                else:
-                    # 履歴がまだ溜まっていない
-                     print(f"[INFO] Prediction history count ({len(prediction_history)}/{CONSECUTIVE_PREDICTIONS_FOR_SLACK}) not met yet.")
+                # 連続回数に達していない場合のログは削除 (不要なため)
                 # --- Slack通知判定ここまで ---
 
             except Exception as e:
@@ -305,6 +324,7 @@ async def ble_loop():
                 row_data = [absolute_time_str, f"{relative_time:.3f}", rssi, last_predicted_location] # CSVには最新の推論を記録
                 try:
                     csv_writer.writerow(row_data)
+                    csv_file.flush() # バッファを即座にディスクに書き込む
                 except Exception as e:
                     print(f"[WARN] Failed to write to CSV: {e}")
 
