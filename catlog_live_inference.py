@@ -21,12 +21,16 @@ from typing import Deque, List, Tuple, Optional, Any # ★ 型ヒント用
 
 import pandas as pd
 import numpy as np
-import joblib
+# import joblib # model_utils で使用
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from bleak import BleakScanner
 import matplotlib.pyplot as plt
 import japanize_matplotlib # 日本語表示用
+
+# --- ライブラリからのインポート ---
+from blelocation.model_utils import load_model_bundle
+from blelocation.feature_engineering import extract_inference_features
 
 # ──────────────── 設定 ────────────────
 TARGET_PREFIX   = "Cat"      # デバイス名のプレフィクス
@@ -66,24 +70,18 @@ parser.add_argument("--slack-channel", required=True, help="Slack Channel Name (
 args = parser.parse_args()
 
 # --- モデルバンドルの読み込み ---
-try:
-    bundle_path = Path(MODEL_BUNDLE_PATH)
-    if not bundle_path.exists():
-        print(f"[ERROR] Model bundle not found: {MODEL_BUNDLE_PATH}")
-        sys.exit(1)
-    bundle = joblib.load(bundle_path)
-    model = bundle['model']
-    scaler = bundle['scaler']
-    class_names = bundle['classes']
-    feature_names = bundle['features']
-    min_points_per_window = bundle['min_points_per_window']
-    print(f"[INFO] Model bundle loaded successfully from {MODEL_BUNDLE_PATH}")
-    print(f"  - Classes: {class_names}")
-    print(f"  - Features: {feature_names}")
-    print(f"  - Min points for inference: {min_points_per_window}")
-except Exception as e:
-    print(f"[ERROR] Failed to load model bundle: {e}")
-    sys.exit(1)
+bundle = load_model_bundle(MODEL_BUNDLE_PATH)
+if bundle is None:
+    sys.exit(1) # load_model_bundle 内でエラーメッセージ表示済み
+
+model = bundle['model']
+scaler = bundle['scaler']
+class_names = bundle['classes']
+feature_names = bundle['features']
+min_points_per_window = bundle['min_points_per_window']
+print(f"  - Classes: {class_names}")
+print(f"  - Features: {feature_names}")
+print(f"  - Min points for inference: {min_points_per_window}")
 
 # --- Slackクライアント初期化 ---
 slack_client = WebClient(token=args.slack_token)
@@ -146,25 +144,6 @@ def format_duration(seconds):
     else:
         return f"約{sec}秒"
 
-def extract_inference_features(data_list):
-    """推論用の特徴量を抽出する"""
-    if not data_list or len(data_list) < min_points_per_window:
-        return None
-
-    rssi_values = [item[1] for item in data_list]
-    rssi_series = pd.Series(rssi_values)
-
-    features = {
-        'rssi_mean': rssi_series.mean(),
-        'rssi_std': rssi_series.std(),
-        'rssi_min': rssi_series.min(),
-        'rssi_max': rssi_series.max(),
-        'rssi_median': rssi_series.median(),
-        'rssi_range': rssi_series.max() - rssi_series.min(),
-    }
-    feature_df = pd.DataFrame([features])[feature_names]
-    feature_df['rssi_std'].fillna(0, inplace=True)
-    return feature_df
 
 def run_inference():
     """データウィンドウから特徴量を抽出し、推論を実行、条件を満たせばSlackに投稿＆履歴投稿"""
@@ -178,7 +157,15 @@ def run_inference():
 
     if len(recent_data) >= min_points_per_window:
         print(f"[INFO] Running inference with {len(recent_data)} data points from the last {INFERENCE_INTERVAL_SEC} seconds...")
-        feature_df = extract_inference_features(recent_data)
+        # 入力形式をDataFrameに変換
+        recent_data_df = pd.DataFrame(recent_data, columns=['timestamp', 'rssi_dbm'])
+        # ライブラリ関数を呼び出す
+        feature_df = extract_inference_features(
+            data=recent_data_df,
+            rssi_col='rssi_dbm', # RSSIデータが含まれる列名
+            feature_names=feature_names, # モデルが学習した特徴量名を指定
+            min_points_required=min_points_per_window # 最小ポイント数を指定
+        )
 
         if feature_df is not None:
             try:

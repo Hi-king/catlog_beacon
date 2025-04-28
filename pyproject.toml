@@ -3,6 +3,7 @@ name = "catlogbeacon"
 version = "0.1.0"
 description = ""
 authors = ["Hi-king <hikingko1@gmail.com>"]
+packages = [{ include = "blelocation" }]
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.14"
