@@ -64,10 +64,18 @@ last_notified_location = None # 最後に通知した場所
 last_notified_time = None     # 最後に通知した時刻 (time.time())
 
 # --- コマンドライン引数 ---
-parser = argparse.ArgumentParser(description="リアルタイムRSSIプロット＆場所推論＆Slack通知")
-parser.add_argument("--slack-token", required=True, help="Slack Bot Token")
-parser.add_argument("--slack-channel", required=True, help="Slack Channel Name (e.g., #general) or ID")
+parser = argparse.ArgumentParser(description="リアルタイムRSSIプロット＆場所推論（Slack通知はオプション）")
+parser.add_argument("--slack-token", required=False, help="Slack Bot Token (通知する場合に必須)")
+parser.add_argument("--slack-channel", required=False, help="Slack Channel Name (e.g., #general) or ID (通知する場合に必須)")
 args = parser.parse_args()
+
+# --- Slack 利用判定 ---
+USE_SLACK = args.slack_token is not None and args.slack_channel is not None
+if USE_SLACK:
+    print("[INFO] Slack notification enabled.")
+else:
+    print("[INFO] Slack notification disabled.")
+
 
 # --- モデルバンドルの読み込み ---
 bundle = load_model_bundle(MODEL_BUNDLE_PATH)
@@ -83,14 +91,18 @@ print(f"  - Classes: {class_names}")
 print(f"  - Features: {feature_names}")
 print(f"  - Min points for inference: {min_points_per_window}")
 
-# --- Slackクライアント初期化 ---
-slack_client = WebClient(token=args.slack_token)
-try:
-    response = slack_client.auth_test()
-    print(f"[INFO] Slack client initialized successfully for user {response['user']}")
-except SlackApiError as e:
-    print(f"[ERROR] Failed to initialize Slack client: {e.response['error']}")
-    sys.exit(1)
+# --- Slackクライアント初期化 (必要な場合のみ) ---
+slack_client = None
+if USE_SLACK:
+    slack_client = WebClient(token=args.slack_token)
+    try:
+        response = slack_client.auth_test()
+        print(f"[INFO] Slack client initialized successfully for user {response['user']}")
+    except SlackApiError as e:
+        print(f"[ERROR] Failed to initialize Slack client: {e.response['error']}")
+        print("[INFO] Proceeding without Slack notifications.")
+        USE_SLACK = False # 初期化失敗したら Slack は使わない
+        slack_client = None # クライアントも None に戻す
 
 # --- CSV ファイル準備 ---
 try:
@@ -123,6 +135,10 @@ except IOError as e:
 
 def post_to_slack(channel, text, thread_ts=None):
     """Slackにメッセージを投稿する。成功したらレスポンスを、失敗したらNoneを返す"""
+    if not USE_SLACK or slack_client is None:
+        print("[DEBUG] Slack is disabled or client not initialized. Skipping post.")
+        return None # Slackが無効なら何もしない
+
     try:
         response = slack_client.chat_postMessage(
             channel=channel,
@@ -213,17 +229,28 @@ def run_inference():
                                 if last_notified_location is not None and last_notified_time is not None:
                                     duration_seconds = confirmed_time - last_notified_time
                                 duration_str = f"（「{last_notified_location}」に{format_duration(duration_seconds)}滞在）" if duration_seconds is not None else ""
-
-                                # 1. メインチャンネルへの通知
                                 slack_message = f"猫様は現在「{confirmed_location}」に移動しました {duration_str}(信頼度: {predicted_probability:.0%})"
-                                main_post_response = post_to_slack(args.slack_channel, slack_message)
 
-                                if main_post_response and main_post_response.get("ok"):
-                                    print(f"[INFO] Slack notification posted (location changed): {slack_message}")
-                                    message_ts = main_post_response.get("ts")
+                                # --- Slack通知実行 (有効な場合のみ) ---
+                                main_post_response = None
+                                message_ts = None
+                                if USE_SLACK:
+                                    print("[INFO] Posting location change to Slack...")
+                                    main_post_response = post_to_slack(args.slack_channel, slack_message)
+                                    if main_post_response and main_post_response.get("ok"):
+                                        print(f"[INFO] Slack notification posted (location changed): {slack_message}")
+                                        message_ts = main_post_response.get("ts")
+                                    else:
+                                        print("[WARN] Failed to post main Slack notification.")
+                                else:
+                                    print(f"[INFO] Slack disabled. Skipping notification for: {slack_message}")
 
-                                    # 2. スレッドへの履歴投稿
-                                    if message_ts:
+                                # --- Slack通知が成功した場合、またはSlackが無効な場合に状態を更新 ---
+                                # (Slackが無効でも場所が変わったという事実は記録するため)
+                                if (USE_SLACK and main_post_response and main_post_response.get("ok")) or not USE_SLACK:
+
+                                    # --- スレッドへの履歴投稿 (Slack通知成功時のみ) ---
+                                    if USE_SLACK and message_ts:
                                         thread_history_limit = now_dt - timedelta(minutes=INFERENCE_LOG_HISTORY_MINUTES)
                                         history_lines = []
                                         for dt, loc, prob in reversed(inference_log_history): # 新しい順に
@@ -241,22 +268,20 @@ def run_inference():
                                                 print(f"[WARN] Failed to post history to the thread (ts: {message_ts})")
                                         else:
                                             print("[INFO] No recent inference history to post to the thread.")
-                                    else:
+                                    elif USE_SLACK and not message_ts:
                                         print("[WARN] Could not get message timestamp ('ts') to post history to thread.")
+                                    # --- スレッド投稿ここまで ---
 
-                                    # 通知状態を更新
+                                    # 状態を更新 (場所が変わった事実は記録)
                                     last_notified_location = confirmed_location
                                     last_notified_time = confirmed_time
-                                    # ★★★ 場所変更通知が成功した後に履歴をクリア ★★★
+                                    # ★★★ 場所変更が確認された後 (Slack通知有無に関わらず) に履歴をクリア ★★★
                                     prediction_history.clear()
-                                    print("[INFO] Prediction history cleared after location change notification.")
-                                else:
-                                    # メイン投稿失敗
-                                    print("[WARN] Failed to post main Slack notification.")
-                                    # ★ 失敗時は履歴をクリアしない (次の機会に再試行できるように)
+                                    print("[INFO] Prediction history cleared after location change was confirmed.")
+                                # else: # Slack有効でメイン投稿失敗した場合 -> 状態は更新せず、履歴もクリアしない
 
                             else:
-                                # 場所は確定したが、前回通知から変わっていない
+                                # 場所は確定したが、前回通知から変わっていない (Slack通知不要)
                                 print(f"[INFO] Location '{confirmed_location}' confirmed, but no change since last notification. No Slack post.")
                                 # ★ 場所が変わっていない場合は履歴をクリアしない ★
 
