@@ -29,7 +29,7 @@ async def main():
     print("Scanning for 20 seconds...")
     await scanner.start()
     try:
-        await asyncio.sleep(20)      # とりあえず 20 秒
+        await asyncio.sleep(100)      # とりあえず 20 秒
     finally:
         await scanner.stop()
         print("Scan finished.")

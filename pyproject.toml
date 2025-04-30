@@ -18,7 +18,16 @@ setuptools = "*"
 slack-sdk = "*"
 
 [tool.poetry.dev-dependencies]
+pandas-stubs = "*"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.mypy]
+# Ignore missing imports for packages without stubs
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "japanize_matplotlib.*"
+ignore_errors = true

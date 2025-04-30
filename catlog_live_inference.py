@@ -26,7 +26,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from bleak import BleakScanner
 import matplotlib.pyplot as plt
-import japanize_matplotlib # 日本語表示用
+import japanize_matplotlib # type: ignore # 日本語表示用
 
 # --- ライブラリからのインポート ---
 from blelocation.model_utils import load_model_bundle
@@ -38,7 +38,7 @@ SCAN_INTERVAL   = 0.03       # スキャナループのウェイト [s]
 PLOT_INTERVAL   = 0.25       # グラフ更新間隔 [s]
 INFERENCE_INTERVAL_SEC = 60   # 推論実行間隔 [s]
 CONSECUTIVE_PREDICTIONS_FOR_SLACK = 3 # Slack通知に必要な連続同一予測回数
-SLACK_CONFIDENCE_THRESHOLD = 0.60 # Slack通知に必要な信頼度(確率)の閾値 (0.0 ~ 1.0)
+SLACK_CONFIDENCE_THRESHOLD = 0.50 # Slack通知に必要な信頼度(確率)の閾値 (0.0 ~ 1.0)
 INFERENCE_LOG_HISTORY_MINUTES = 30 # Slackスレッド投稿用の履歴保持期間(分)
 Y_LIM           = (-100, -30) # RSSI 表示範囲
 CSV_FILENAME    = "rssi_inference_log.csv" # 出力CSVファイル名
@@ -325,7 +325,7 @@ async def ble_loop():
             now = datetime.now()
             current_timestamp = now.timestamp()
             relative_time = current_timestamp - t0
-            rssi = device.rssi
+            rssi = adv.rssi # device.rssi から変更
             absolute_time_str = now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
             with buf_lock:
