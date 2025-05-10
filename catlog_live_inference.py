@@ -62,6 +62,7 @@ prediction_history: Deque[str] = deque(maxlen=CONSECUTIVE_PREDICTIONS_FOR_SLACK)
 # Slack通知状態管理
 last_notified_location = None # 最後に通知した場所
 last_notified_time = None     # 最後に通知した時刻 (time.time())
+seen_addresses = set()
 
 # --- コマンドライン引数 ---
 parser = argparse.ArgumentParser(description="リアルタイムRSSIプロット＆場所推論（Slack通知はオプション）")
@@ -306,6 +307,9 @@ def run_inference():
 def start_ble_thread():
     asyncio.run(ble_loop())
 
+def pretty_mfg(mfg_dict):
+    return ",".join(f"{cid:04X}:{data.hex()}" for cid, data in mfg_dict.items()) or "-"
+
 async def ble_loop():
     global last_inference_time
     target_addr = None
@@ -314,9 +318,16 @@ async def ble_loop():
     def detection_cb(device, adv):
         nonlocal target_addr
         global last_inference_time, last_predicted_location
+        # 新規デバイスアドレスを検出したらdebug print
+        if device.address not in seen_addresses:
+            print(f"[DEBUG] New device detected: {device.address} ({device.name}) ({adv.rssi}) ({pretty_mfg(adv.manufacturer_data)})")
+            seen_addresses.add(device.address)
 
         if target_addr is None:
-            if device.name and device.name.startswith(TARGET_PREFIX):
+            if (
+                ( adv.manufacturer_data and pretty_mfg(adv.manufacturer_data).find("02157bec01006bf04e64a0094d17999f3bee2910035fc3") != -1 ) or (
+                device.name and device.name.startswith(TARGET_PREFIX)
+            )):
                 target_addr = device.address
                 print(f"[INFO] TARGET FOUND  →  {device.address} ({device.name})")
                 found_event.set()
