@@ -10,6 +10,7 @@
 - **`catlog_live_inference.py`**: 特定デバイス("Cat"*)のRSSIを監視し、機械学習モデルで場所を推論してSlackに通知、CSVに記録します。
 - **`catlog_live_plot.py`**: 特定デバイス("Cat"*)のRSSIをリアルタイムでプロットし、全履歴をグラフ表示・CSV記録します。
 - **`scan_all.py`**: 短時間スキャンし、検出された全BLEデバイスの情報をRSSI順にリスト表示します。
+- **`create_training_data.py`**: `rssi_inference_log.csv` から指定した時間範囲のデータを切り出し、教師データとして `data/` ディレクトリに保存します。
 - **`eda_classification.ipynb`**: `data/` 内の教師データCSVから場所分類モデルを訓練し、`location_classification_bundle.joblib` を生成します。
 
 ### データディレクトリ
