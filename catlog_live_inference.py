@@ -58,6 +58,9 @@ inference_log_history_maxlen = int(INFERENCE_LOG_HISTORY_MINUTES * 60 / INFERENC
 inference_log_history: Deque[Tuple[datetime, str, float]] = deque(maxlen=inference_log_history_maxlen) # (datetime, location, probability)
 last_inference_time = time.time()
 last_predicted_location: str = "不明" # プロット表示用
+last_predicted_probability: Optional[float] = None # CSV出力用
+last_second_predicted_location: str = "不明" # CSV出力用
+last_second_predicted_probability: Optional[float] = None # CSV出力用
 prediction_history: Deque[str] = deque(maxlen=CONSECUTIVE_PREDICTIONS_FOR_SLACK) # Slack通知判定用の予測履歴
 # Slack通知状態管理
 last_notified_location = None # 最後に通知した場所
@@ -116,7 +119,7 @@ try:
     csv_writer = csv.writer(csv_file)
 
     if write_header:
-        csv_writer.writerow(["datetime", "time_s", "rssi_dbm", "predicted_location"]) # ヘッダー
+        csv_writer.writerow(["datetime", "time_s", "rssi_dbm", "predicted_location", "predicted_probability", "second_predicted_location", "second_predicted_probability"]) # ヘッダー
         print(f"[INFO] Writing header and starting log to '{CSV_FILENAME}'")
     else:
         print(f"[INFO] Appending log data to existing '{CSV_FILENAME}'")
@@ -164,7 +167,8 @@ def format_duration(seconds):
 
 def run_inference():
     """データウィンドウから特徴量を抽出し、推論を実行、条件を満たせばSlackに投稿＆履歴投稿"""
-    global last_predicted_location, prediction_history, inference_log_history
+    global last_predicted_location, last_predicted_probability, last_second_predicted_location, last_second_predicted_probability
+    global prediction_history, inference_log_history
     global last_notified_location, last_notified_time
     current_run_time = time.time() # この推論実行開始時刻
     now_dt = datetime.now() # 履歴記録用
@@ -188,14 +192,31 @@ def run_inference():
             try:
                 features_scaled = scaler.transform(feature_df)
                 probabilities = model.predict_proba(features_scaled)[0]
-                predicted_index = np.argmax(probabilities)
+                
+                # 上位2つの予測を取得
+                sorted_indices = np.argsort(probabilities)[::-1] # 降順ソートされたインデックス
+                
+                predicted_index = sorted_indices[0]
                 predicted_location = class_names[predicted_index]
                 predicted_probability = probabilities[predicted_index]
+                
+                # グローバル変数更新 (CSVおよびプロット用)
+                last_predicted_location = predicted_location
+                last_predicted_probability = predicted_probability
 
-                print(f"[INFO] Predicted location: {predicted_location} (Prob: {predicted_probability:.2f})")
-                last_predicted_location = predicted_location # プロット用は常に更新
+                if len(class_names) > 1 and len(sorted_indices) > 1:
+                    second_predicted_index = sorted_indices[1]
+                    second_predicted_location = class_names[second_predicted_index]
+                    second_predicted_probability = probabilities[second_predicted_index]
+                    last_second_predicted_location = second_predicted_location
+                    last_second_predicted_probability = second_predicted_probability
+                    print(f"[INFO] Predicted location: {predicted_location} (Prob: {predicted_probability:.2f}), 2nd: {second_predicted_location} (Prob: {second_predicted_probability:.2f})")
+                else:
+                    last_second_predicted_location = "N/A"
+                    last_second_predicted_probability = 0.0
+                    print(f"[INFO] Predicted location: {predicted_location} (Prob: {predicted_probability:.2f}) (Only one class or prediction)")
 
-                # 推論ログ履歴に追加
+                # 推論ログ履歴に追加 (主たる予測のみ)
                 inference_log_history.append((now_dt, predicted_location, predicted_probability))
 
                 # --- Slack通知判定ロジック ---
@@ -317,7 +338,7 @@ async def ble_loop():
 
     def detection_cb(device, adv):
         nonlocal target_addr
-        global last_inference_time, last_predicted_location
+        global last_inference_time, last_predicted_location, last_predicted_probability, last_second_predicted_location, last_second_predicted_probability
         # 新規デバイスアドレスを検出したらdebug print
         if device.address not in seen_addresses:
             print(f"[DEBUG] New device detected: {device.address} ({device.name}) ({adv.rssi}) ({pretty_mfg(adv.manufacturer_data)})")
@@ -344,7 +365,20 @@ async def ble_loop():
                 rssi_buf.append(rssi)
                 inference_data_window.append((current_timestamp, rssi))
 
-                row_data = [absolute_time_str, f"{relative_time:.3f}", rssi, last_predicted_location] # CSVには最新の推論を記録
+                # CSV書き込みデータの準備
+                prob_str = f"{last_predicted_probability:.4f}" if last_predicted_probability is not None else ""
+                sec_loc_str = str(last_second_predicted_location) if last_second_predicted_location is not None else ""
+                sec_prob_str = f"{last_second_predicted_probability:.4f}" if last_second_predicted_probability is not None else ""
+                
+                row_data = [
+                    absolute_time_str, 
+                    f"{relative_time:.3f}", 
+                    rssi, 
+                    last_predicted_location,
+                    prob_str,
+                    sec_loc_str,
+                    sec_prob_str
+                ]
                 try:
                     csv_writer.writerow(row_data)
                     csv_file.flush() # バッファを即座にディスクに書き込む
