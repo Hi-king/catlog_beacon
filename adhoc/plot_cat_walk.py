@@ -4,28 +4,25 @@ import matplotlib.image as mpimg
 import numpy as np
 import random
 
-# 1. CSVデータ読み込み（サンプルデータを100点生成）
-room_list = ['BEDROOM', 'HALLWAY', 'DINING ROOM', 'LIVING ROOM', 'KITCHEN', 'OFFICE', 'BATHROOM', 'LAUNDRY ROOM', '猫用トイレ', 'ソファー']
-
-timestamps = pd.to_datetime('2025-04-28 21:00') + pd.to_timedelta(np.cumsum(np.random.exponential(scale=60, size=100)), unit='s')
-locations = [random.choice(room_list) for _ in range(100)]
-
-
-
-
-data = {
-    'timestamp': timestamps,
-    'location': locations
-}
-
-df = pd.DataFrame(data) # この行はサンプルデータ作成用なので、実際には不要かもしれません。コメントアウトまたは削除を検討。
-
 # --- Parameters ---
 MIN_DURATION_MINUTES = 5
 min_duration_seconds = MIN_DURATION_MINUTES * 60
 
-# --- Data Loading and Filtering ---
-df = pd.read_csv("rssi_inference_log.csv").rename(columns={"datetime": "timestamp", "predicted_location": "location"})
+# 1. CSVデータ読み込み（サンプルデータを100点生成）
+
+# room_list = ['BEDROOM', 'HALLWAY', 'DINING ROOM']
+
+# timestamps = pd.to_datetime('2025-04-28 21:00') + pd.to_timedelta(np.cumsum(np.random.exponential(scale=60, size=100)), unit='s')
+# locations = [random.choice(room_list) for _ in range(100)]
+
+# data = {
+#     'timestamp': timestamps,
+#     'location': locations
+# }
+
+# df = pd.DataFrame(data) # この行はサンプルデータ作成用なので、実際には不要かもしれません。コメントアウトまたは削除を検討。
+
+df = pd.read_csv("rssi_inference_log.csv").rename(columns={"datetime": "timestamp", "predicted_locatio": "location"})
 
 # timestampをdatetimeに変換し、ソート
 df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -57,22 +54,23 @@ df_filtered['stay_duration'] = df_filtered['stay_duration'].dt.total_seconds().f
 
 # --- 2. Room Coordinates ---
 room_positions = {
-    'LIVING ROOM': (100, 150),
-    'リビング': (100, 150),
-    'DINING ROOM': (200, 150),
-    'KITCHEN': (300, 150),
-    'キッチン': (300, 150),
-    'OFFICE': (100, 300),
-    '書斎': (100, 300),
-    'BATHROOM': (200, 300),
-    'LAUNDRY ROOM': (300, 300),
-    'BEDROOM': (200, 450),
-    'ベッド下': (200, 450),
-    'キャットタワー': (200, 450),
-    'HALLWAY': (300, 450),
-    '寝室前廊下': (300, 450),
-    '猫用トイレ': (200, 100),
-    'ソファー': (100, 100),
+    'LIVING ROOM': (1350, 200),
+    'リビング': (1350, 200),
+    'DINING ROOM': (1350, 200),
+
+    'KITCHEN': (1000, 800),
+    'キッチン': (1000, 800),
+    'OFFICE': (800, 200),
+    '書斎': (800, 200),
+
+    'BEDROOM': (180, 450),
+    'ベッド下': (180, 450),
+
+    'キャットタワー': (100, 320),
+
+    'HALLWAY': (300, 800),
+    '寝室前廊下': (300, 800),
+
     '不明':(0, 0),
 }
 
@@ -94,7 +92,7 @@ df_filtered['y_noisy'] = noisy_coords.apply(lambda coord: coord[1])
 
 # --- 3. Background Image ---
 # img = mpimg.imread('/mnt/data/348ff89b-4950-4517-81af-bb398574e73e.png')
-img_path = '/Users/keisuke.ogaki/Downloads/Screenshot_20250428-211739.png'
+img_path = './adhoc/room.png'
 try:
     img = mpimg.imread(img_path)
 except FileNotFoundError:
@@ -106,9 +104,15 @@ except FileNotFoundError:
 import matplotlib.colors as mcolors
 
 # --- 4. Plotting ---
-fig, ax = plt.subplots(figsize=(12, 18))
-# extentをタプルに変更, aspectを追加
-ax.imshow(img, extent=(0, 400, 600, 0), aspect='auto')
+# extentを画像のサイズに合わせる
+img_height, img_width, _ = img.shape
+# figsizeを画像のサイズに合わせて調整 (アスペクト比を維持しつつ、適宜調整)
+# 例: 画像の幅を基準にfigsizeの幅を決定し、高さはアスペクト比から計算
+base_width = 10 # 基準となるfigsizeの幅
+figsize_width = base_width
+figsize_height = base_width * (img_height / img_width)
+fig, ax = plt.subplots(figsize=(figsize_width, figsize_height))
+ax.imshow(img, extent=(0, img_width, img_height, 0), aspect='auto')
 
 # 色を時間に合わせて変化させる (df_filteredを使用)
 norm = mcolors.Normalize(vmin=df_filtered['time_numeric'].min(), vmax=df_filtered['time_numeric'].max())
@@ -135,8 +139,9 @@ cbar = plt.colorbar(sc, ax=ax, shrink=0.5) # shrinkでサイズ調整
 cbar.set_label(f'Time elapsed since first significant stay (seconds)')
 
 # --- 5. Final Plot Settings ---
-ax.set_xlim(0, 400)
-ax.set_ylim(600, 0)
+# x軸とy軸の表示範囲を画像のサイズに合わせる
+ax.set_xlim(0, img_width)
+ax.set_ylim(img_height, 0)
 ax.set_title(f'Cat Walk (Stays >= {MIN_DURATION_MINUTES} min marked)')
 ax.axis('off')
 plt.show()
