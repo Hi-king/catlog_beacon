@@ -22,3 +22,7 @@
 - **`rssi_log.csv`**: `catlog_live_plot.py` が生成する、ターゲットデバイスのRSSIログ。
 - **`rssi_inference_log.csv`**: `catlog_live_inference.py` が生成する、RSSIと場所の推論結果ログ。
 - **`location_classification_bundle.joblib`**: `eda_classification.ipynb` が生成する、訓練済みモデルバンドル。
+
+## デモ
+
+![Cat Walk Animation](docs/catwalk_60fps.gif)
