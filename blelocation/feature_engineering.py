@@ -69,13 +69,12 @@ def extract_inference_features(
     # 存在しない特徴量名が要求された場合、その列は作成されない
     feature_df = pd.DataFrame([final_features], columns=feature_names)
 
-    # 標準偏差のNaNを0で埋める (再度確認)
+    # 標準偏差はNoneはない
     if 'rssi_std' in feature_df.columns:
-        feature_df['rssi_std'] = feature_df['rssi_std'].fillna(0.0)
+        assert feature_df['rssi_std'].notna().all()
 
-    # 要求されたすべての特徴量が含まれているか確認 (オプション)
-    # missing_features = [f for f in feature_names if f not in feature_df.columns]
-    # if missing_features:
-    #     print(f"[WARN] Could not calculate the following features: {missing_features}")
+    # 要求されたすべての特徴量が含まれているか確認 
+    missing_features = [f for f in feature_names if f not in feature_df.columns]
+    assert not missing_features
 
     return feature_df
